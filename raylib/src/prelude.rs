@@ -15,14 +15,13 @@ Permission is granted to anyone to use this software for any purpose, including 
 */
 
 //! The raylib-rs prelude.
-//! 
+//!
 //! This prelude module is for bringing many commonly-used types, functions, and constants into scope all at once.
-//! 
+//!
 //! # Example
-//! 
+//!
 //! ```
 //! use raylib::prelude::*;
 //! ```
 
 pub use crate::*;
-pub use crate::consts::*;
