@@ -8,6 +8,53 @@ use std::{env, fs, io};
 const LATEST_RAYLIB_VERSION: &str = "2.0.0";
 const LATEST_RAYLIB_API_VERSION: &str = "2";
 
+fn platform_from_target(target: &str) -> (Platform, PlatformOS) {
+    let PLATFORM = if target.contains("wasm32") {
+        // make sure cmake knows that it should bundle glfw in
+        // Cargo web takes care of this but better safe than sorry
+        env::set_var("EMMAKEN_CFLAGS", "-s USE_GLFW=3");
+        Platform::Web
+    } else if target.contains("armv7-unknown-linux") {
+        Platform::RPI
+    } else {
+        Platform::Desktop
+    };
+
+    let PLATFORM_OS = if PLATFORM == Platform::Desktop {
+        // Determine PLATFORM_OS in case PLATFORM_DESKTOP selected
+        if env::var("OS")
+            .unwrap_or("".to_owned())
+            .contains("Windows_NT")
+        {
+            // No uname.exe on MinGW!, but OS=Windows_NT on Windows!
+            // ifeq ($(UNAME),Msys) -> Windows
+            PlatformOS::Windows
+        } else {
+            let un: &str = &uname();
+            match un {
+                "Linux" => PlatformOS::Linux,
+                "FreeBSD" => PlatformOS::BSD,
+                "OpenBSD" => PlatformOS::BSD,
+                "NetBSD" => PlatformOS::BSD,
+                "DragonFly" => PlatformOS::BSD,
+                "Darwin" => PlatformOS::OSX,
+                _ => panic!("Unknown platform {}", uname()),
+            }
+        }
+    } else if PLATFORM == Platform::RPI {
+        let un: &str = &uname();
+        if un == "Linux" {
+            PlatformOS::Linux
+        } else {
+            PlatformOS::Unknown
+        }
+    } else {
+        PlatformOS::Unknown
+    };
+    
+    (PLATFORM, PLATFORM_OS)
+}
+
 /// compile the given src file
 fn compile_obj<P>(
     src_dir: &Path,
@@ -88,16 +135,7 @@ fn compile_raylib(raylib_src_path: &Path, target: &str, release: bool) -> BuildS
     let build_raudio_object = INCLUDE_AUDIO_MODULE;
     let build_mini_al_object = false;
 
-    let PLATFORM = if target.contains("wasm32") {
-        // make sure cmake knows that it should bundle glfw in
-        // Cargo web takes care of this but better safe than sorry
-        env::set_var("EMMAKEN_CFLAGS", "-s USE_GLFW=3");
-        Platform::Web
-    } else if target.contains("armv7-unknown-linux") {
-        Platform::RPI
-    } else {
-        Platform::Desktop
-    };
+    let (PLATFORM, PLATFORM_OS) = platform_from_target(target);
 
     // Library type used for raylib: STATIC (.a) or SHARED (.so/.dll)
     let _RAYLIB_LIBTYPE = LibType::Static;
@@ -120,38 +158,6 @@ fn compile_raylib(raylib_src_path: &Path, target: &str, release: bool) -> BuildS
 
     // TODO BUNCH OF RASPBERRY PI STUFF IN MAKEFILE
     // MAKEFILE LINE 97
-
-    let PLATFORM_OS = if PLATFORM == Platform::Desktop {
-        // Determine PLATFORM_OS in case PLATFORM_DESKTOP selected
-        if env::var("OS")
-            .unwrap_or("".to_owned())
-            .contains("Windows_NT")
-        {
-            // No uname.exe on MinGW!, but OS=Windows_NT on Windows!
-            // ifeq ($(UNAME),Msys) -> Windows
-            PlatformOS::Windows
-        } else {
-            let un: &str = &uname();
-            match un {
-                "Linux" => PlatformOS::Linux,
-                "FreeBSD" => PlatformOS::BSD,
-                "OpenBSD" => PlatformOS::BSD,
-                "NetBSD" => PlatformOS::BSD,
-                "DragonFly" => PlatformOS::BSD,
-                "Darwin" => PlatformOS::OSX,
-                _ => panic!("Unknown platform {}", uname()),
-            }
-        }
-    } else if PLATFORM == Platform::RPI {
-        let un: &str = &uname();
-        if un == "Linux" {
-            PlatformOS::Linux
-        } else {
-            PlatformOS::Unknown
-        }
-    } else {
-        PlatformOS::Unknown
-    };
 
     dbg!(&PLATFORM);
     dbg!(&PLATFORM_OS);
@@ -424,45 +430,7 @@ fn bundle(target: &str, release: bool, out_dir: &Path) {
         bundled_glfw,
     } = compile_raylib(&raylib_src_path.as_path().join("src"), &target, release);
 
-    // Generate bindings
-    match (cfg!(feature = "genbindings"), &platform, &platform_os) {
-        (false, _, PlatformOS::Windows) => {
-            fs::write(
-                out_dir.join("bindings.rs"),
-                include_str!("bindings_windows.rs"),
-            )
-            .expect("failed to write bindings");
-        }
-        (false, _, PlatformOS::Linux) => {
-            fs::write(
-                out_dir.join("bindings.rs"),
-                include_str!("bindings_linux.rs"),
-            )
-            .expect("failed to write bindings");
-        }
-        (false, _, PlatformOS::OSX) => {
-            fs::write(out_dir.join("bindings.rs"), include_str!("bindings_osx.rs"))
-                .expect("failed to write bindings");
-        }
-        (false, Platform::Web, _) => {
-            fs::write(out_dir.join("bindings.rs"), include_str!("bindings_web.rs"))
-                .expect("failed to write bindings");
-        }
-        // for other platforms use bindgen and hope it works
-        _ => {
-            bindgen::Builder::default()
-                .rustfmt_bindings(true)
-                .header(format!(
-                    "{}",
-                    raylib_src_path.join("src/raylib.h").display()
-                ))
-                .constified_enum_module("*")
-                .generate()
-                .expect("Failed to generate bindings")
-                .write_to_file(out_dir.join("bindings.rs"))
-                .expect("Failed to write bindings");
-        }
-    }
+    gen_bindings(&platform, &platform_os, Some(&raylib_src_path), &out_dir);
 
     // Generate cargo metadata for linking to raylib
     if platform == Platform::Desktop {
@@ -517,6 +485,50 @@ fn link() {
     println!("cargo:rustc-link-lib=static=raylib");
 }
 
+fn gen_bindings<'a>(platform: &Platform, platform_os: &PlatformOS, raylib_src_path: Option<&'a Path>, out_dir: &Path) {
+    let default = &PathBuf::from(".");
+    let raylib_src_path = raylib_src_path.unwrap_or(default);
+    // Generate bindings
+    match (cfg!(feature = "genbindings"), &platform, &platform_os) {
+        (false, _, PlatformOS::Windows) => {
+            fs::write(
+                out_dir.join("bindings.rs"),
+                include_str!("bindings_windows.rs"),
+            )
+            .expect("failed to write bindings");
+        }
+        (false, _, PlatformOS::Linux) => {
+            fs::write(
+                out_dir.join("bindings.rs"),
+                include_str!("bindings_linux.rs"),
+            )
+            .expect("failed to write bindings");
+        }
+        (false, _, PlatformOS::OSX) => {
+            fs::write(out_dir.join("bindings.rs"), include_str!("bindings_osx.rs"))
+                .expect("failed to write bindings");
+        }
+        (false, Platform::Web, _) => {
+            fs::write(out_dir.join("bindings.rs"), include_str!("bindings_web.rs"))
+                .expect("failed to write bindings");
+        }
+        // for other platforms use bindgen and hope it works
+        _ => {
+            bindgen::Builder::default()
+                .rustfmt_bindings(true)
+                .header(format!(
+                    "{}",
+                    raylib_src_path.join("src/raylib.h").display()
+                ))
+                .constified_enum_module("*")
+                .generate()
+                .expect("Failed to generate bindings")
+                .write_to_file(out_dir.join("bindings.rs"))
+                .expect("Failed to write bindings");
+        }
+    }
+}
+
 fn main() {
     let target = env::var("TARGET").expect("Cargo build scripts always have TARGET");
     let release = env::var("PROFILE")
@@ -525,12 +537,15 @@ fn main() {
     let out_dir =
         PathBuf::from(env::var("OUT_DIR").expect("Cargo build scripts always have an OUT_DIR"));
 
+    let (platform, platform_os) = platform_from_target(&target);
+
     // TODO if we ever have a shared feature determine whether
     // we download and compile from source here
     if cfg!(feature = "bundled") || target.contains("emscripten") {
         bundle(&target, release, &out_dir);
     } else {
         link();
+        gen_bindings(&platform, &platform_os, None, &out_dir);
     }
 }
 
