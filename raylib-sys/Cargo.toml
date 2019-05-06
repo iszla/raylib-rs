@@ -13,7 +13,7 @@ build = "build.rs"
 
 [build-dependencies]
 bindgen = "^0.47"
-reqwest = "0.7"
+reqwest = "^0.9"
 tar = "0.4"
 flate2 = "0.2"
 cc = "1.0"
